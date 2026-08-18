@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Topography</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Comfortaa:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        *{box-sizing:border-box;margin:0;padding:0}
+        html,body{width:100%;height:100%;overflow:hidden;background:#050507}
+        body{display:flex;align-items:center;justify-content:center;font-family:'Comfortaa',cursive}
+        canvas{display:block;position:fixed;top:0;left:0;width:100vw;height:100vh;cursor:crosshair}
+        .controls{
+            position:fixed;bottom:28px;left:50%;transform:translateX(-50%);
+            display:flex;align-items:center;justify-content:center;gap:16px;z-index:10;
+            background:rgba(5,5,7,.72);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+            border:1px solid rgba(255,255,255,.05);border-radius:60px;padding:11px 30px;
+            -webkit-tap-highlight-color: rgba(255, 255, 255, 0);
+        }
+        .export-btn{
+            background:var(--accent);color:#fff;border:none;
+            padding:10px 24px;font-family:'Comfortaa',cursive;font-size:.76rem;font-weight:700;
+            border-radius:40px;cursor:pointer;transition:opacity .25s,transform .25s;
+            letter-spacing:.02em;line-height:1.4;white-space:nowrap;flex-shrink:0;
+        }
+        .export-btn:hover{opacity:.86;transform:translateY(-1px)}
+        .export-btn:active{transform:translateY(1px)}
+        .export-btn:disabled{background:#1c1c22;color:#3e3e4a;cursor:not-allowed;transform:none;opacity:1}
+        .divider{width:1px;height:18px;background:rgba(255,255,255,.08);flex-shrink:0}
+        .status-log{
+            font-size:.7rem;color:rgba(255,255,255,.3);min-width:140px;
+            text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+            line-height:1.4;
+        }
+        @media(max-width:540px){
+            .controls{flex-direction:column;border-radius:20px;padding:16px 24px;bottom:14px;gap:10px}
+            .divider{width:40px;height:1px}
+            .status-log{min-width:auto;text-align:center}
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gifshot/0.3.2/gifshot.min.js"></script>
+</head>
+<body>
+    <div class="controls">
+        <button id="exportBtn" class="export-btn">Export 10s Loop GIF</button>
+        <div class="divider"></div>
+        <span id="statusText" class="status-log">Ready</span>
+    </div>
+
+    <script type="module">
+        import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+
+        const WIDTH = 1920, HEIGHT = 1080, LOOP = 10.0;
+
+        /* ── Color Utilities ── */
+        function randHue(){ return Math.random(); }
+        function hsl2rgb(h,s,l){
+            const c=(1-Math.abs(2*l-1))*s, x=c*(1-Math.abs((h*6)%2-1)), m=l-c/2;
+            let r,g,b; const i=Math.floor(h*6)%6;
+            if(i===0){r=c;g=x;b=0}else if(i===1){r=x;g=c;b=0}else if(i===2){r=0;g=c;b=x}
+            else if(i===3){r=0;g=x;b=c}else if(i===4){r=x;g=0;b=c}else{r=c;g=0;b=x}
+            return [r+m,g+m,b+m];
+        }
+
+        const h1 = randHue(), h2 = (h1 + 0.3 + Math.random() * 0.4) % 1.0;
+        const c1 = hsl2rgb(h1, 0.82, 0.56);
+        const c2 = hsl2rgb(h2, 0.82, 0.56);
+
+        const accentPick = c1[0]+c1[1]+c1[2] > c2[0]+c2[1]+c2[2] ? c1 : c2;
+        document.documentElement.style.setProperty('--accent',
+            `rgb(${Math.round(accentPick[0]*255)},${Math.round(accentPick[1]*255)},${Math.round(accentPick[2]*255)})`);
+
+        const gradOX = (Math.random() - 0.5) * 1.6;
+        const gradOY = (Math.random() - 0.5) * 1.0;
+        const gradAngle = Math.random() * Math.PI;
+        const gdx = Math.cos(gradAngle), gdy = Math.sin(gradAngle);
+
+        /* ── Three.js ── */
+        const scene  = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(0,WIDTH,0,HEIGHT,1,10);
+        camera.position.z = 5;
+
+        const renderer = new THREE.WebGLRenderer({antialias:false,alpha:false,preserveDrawingBuffer:true});
+        renderer.setSize(WIDTH,HEIGHT);
+        renderer.setPixelRatio(1);
+        document.body.prepend(renderer.domElement);
+
+        const clock = new THREE.Clock();
+        const geo = new THREE.PlaneGeometry(WIDTH,HEIGHT);
+        geo.translate(WIDTH/2,HEIGHT/2,0);
+
+        const vs = `
+            varying vec2 vUv;
+            void main(){
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+            }
+        `;
+
+        const snoise = `
+            vec3 mod289(vec3 x){return x-floor(x*(1.0/289.0))*289.0;}
+            vec4 mod289(vec4 x){return x-floor(x*(1.0/289.0))*289.0;}
+            vec4 permute(vec4 x){return mod289(((x*34.0)+10.0)*x);}
+            vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+            float snoise(vec3 v){
+                const vec2 C=vec2(1.0/6.0,1.0/3.0);
+                const vec4 D=vec4(0.0,0.5,1.0,2.0);
+                vec3 i=floor(v+dot(v,C.yyy));
+                vec3 x0=v-i+dot(i,C.xxx);
+                vec3 g=step(x0.yzx,x0.xyz);
+                vec3 l=1.0-g;
+                vec3 i1=min(g.xyz,l.zxy);
+                vec3 i2=max(g.xyz,l.zxy);
+                vec3 x1=x0-i1+C.xxx;
+                vec3 x2=x0-i2+C.yyy;
+                vec3 x3=x0-D.yyy;
+                i=mod289(i);
+                vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
+                float n_=0.142857142857;
+                vec3 ns=n_*D.wyz-D.xzx;
+                vec4 j=p-49.0*floor(p*ns.z*ns.z);
+                vec4 x_=floor(j*ns.z);
+                vec4 y_=floor(j-7.0*x_);
+                vec4 x=x_*ns.x+ns.yyyy;
+                vec4 y=y_*ns.x+ns.yyyy;
+                vec4 h=1.0-abs(x)-abs(y);
+                vec4 b0=vec4(x.xy,y.xy);
+                vec4 b1=vec4(x.zw,y.zw);
+                vec4 s0=floor(b0)*2.0+1.0;
+                vec4 s1=floor(b1)*2.0+1.0;
+                vec4 sh=-step(h,vec4(0.0));
+                vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy;
+                vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
+                vec3 p0=vec3(a0.xy,h.x);
+                vec3 p1=vec3(a0.zw,h.y);
+                vec3 p2=vec3(a1.xy,h.z);
+                vec3 p3=vec3(a1.zw,h.w);
+                vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
+                p0*=norm.x;p1*=norm.y;p2*=norm.z;p3*=norm.w;
+                vec4 m=max(0.5-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
+                m=m*m;
+                return 105.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
+            }
+        `;
+
+        const fs = `
+            precision highp float;
+            uniform float time;
+            uniform vec2 resolution;
+            uniform vec3 uC1;
+            uniform vec3 uC2;
+            uniform vec2 uGradOrigin;
+            uniform vec2 uGradDir;
+            varying vec2 vUv;
+
+            #define TAU 6.28318530718
+
+            void main(){
+                vec2 uv = vUv - 0.5;
+                uv.x *= resolution.x / resolution.y;
+                float radius = length(uv);
+
+                float ta = (time / 10.0) * TAU;
+                vec2 lt = vec2(cos(ta), sin(ta)) * 0.4;
+
+                float n1 = snoise(vec3(uv * 2.8 + lt, lt.x * 0.2));
+                float n2 = snoise(vec3(uv * 5.5 - lt, lt.y * 0.3)) * 0.35;
+                float field = radius * 1.2 + n1 * 0.25 + n2 * 0.05;
+
+                float bands = 16.0;
+                float lower = floor(field * bands) / bands;
+                float delta = field - lower;
+
+                float thick = 0.012;
+                float edge  = smoothstep(thick, 0.0, delta);
+
+                float proj = (uv.x - uGradOrigin.x) * uGradDir.x
+                           + (uv.y - uGradOrigin.y) * uGradDir.y;
+                float blend = smoothstep(-0.85, 0.85, proj);
+                vec3 lineCol = mix(uC1, uC2, blend);
+
+                vec3 bgCol = mix(uC1, uC2, 0.5) * 0.06;
+                vec3 col   = mix(bgCol, lineCol, edge);
+
+                col *= clamp(1.0 - radius * 0.5, 0.0, 1.0);
+                col += mix(uC1, uC2, 0.5) * 0.028 * max(0.0, 1.0 - radius * 2.8);
+
+                gl_FragColor = vec4(col, 1.0);
+            }
+        `;
+
+        const material = new THREE.ShaderMaterial({
+            uniforms:{
+                time:        {value:0},
+                resolution:  {value:new THREE.Vector2(WIDTH,HEIGHT)},
+                uC1:         {value:new THREE.Vector3(c1[0],c1[1],c1[2])},
+                uC2:         {value:new THREE.Vector3(c2[0],c2[1],c2[2])},
+                uGradOrigin: {value:new THREE.Vector2(gradOX,gradOY)},
+                uGradDir:    {value:new THREE.Vector2(gdx,gdy)}
+            },
+            vertexShader:vs,
+            fragmentShader:snoise+fs,
+            transparent:false,
+            side:THREE.DoubleSide
+        });
+
+        scene.add(new THREE.Mesh(geo, material));
+
+        let exporting = false;
+        (function animate(){
+            if(!exporting) material.uniforms.time.value = clock.getElapsedTime() % LOOP;
+            renderer.render(scene, camera);
+            requestAnimationFrame(animate);
+        })();
+
+        const exportBtn  = document.getElementById('exportBtn');
+        const statusText = document.getElementById('statusText');
+
+        exportBtn.addEventListener('click',()=>{
+            exporting = true;
+            exportBtn.disabled = true;
+            statusText.textContent = 'Rendering 120 frames at 1080p...';
+
+            const fps=12, total=LOOP*fps, step=LOOP/total, uris=[];
+            let t=0;
+            for(let i=0;i<total;i++){
+                material.uniforms.time.value=t;
+                renderer.render(scene,camera);
+                uris.push(renderer.domElement.toDataURL('image/png'));
+                t+=step;
+            }
+            statusText.textContent='Encoding GIF...';
+
+            gifshot.createGIF({
+                images:uris, gifWidth:WIDTH, gifHeight:HEIGHT,
+                interval:1/fps, numWorkers:4,
+                progressCallback(p){ statusText.textContent=`Encoding ${Math.round(p*100)}%`; }
+            },obj=>{
+                if(!obj.error){
+                    const a=document.createElement('a');
+                    a.href=obj.image; a.download='topography_1080p_loop.gif';
+                    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                    statusText.textContent='Saved';
+                } else { statusText.textContent='Export failed'; }
+                exporting=false; exportBtn.disabled=false;
+            });
+        });
+    </script>
+</body>
+</html>
